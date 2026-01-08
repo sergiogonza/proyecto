@@ -10,3 +10,5 @@ faiss-cpu
 pypdf
 openai
 openpyxl
+tiktoken
+python-multipart
