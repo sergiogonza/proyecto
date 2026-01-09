@@ -54,32 +54,6 @@ db = cargar_corpus()
 # ======================================================
 # 🧰 CACHE DE INFORMACIÓN
 # ======================================================
-def generar_cache():
-    cache = {}
-    # CSVs
-    for csv_file in os.listdir(BASE):
-        if csv_file.endswith(".csv"):
-            df = pd.read_csv(os.path.join(BASE, csv_file))
-            cache[csv_file] = df.to_dict(orient="records")
-    # PDFs y DOCX
-    for carpeta in [PDF_MGA, DOC_BASE, PDD]:
-        if not os.path.exists(carpeta):
-            continue
-        for archivo in os.listdir(carpeta):
-            path = os.path.join(carpeta, archivo)
-            if archivo.lower().endswith(".pdf"):
-                loader = PyPDFLoader(path)
-                docs = loader.load()
-                cache[archivo] = [d.page_content for d in docs]
-    return cache
-
-cache_proyecto = generar_cache()
-
-
-
-# ======================================================
-# 🧠 IA MGA – JSON SEGURO AVANZADO
-# ======================================================
 def generar_cache_completo():
     """
     Genera un cache de información clave que GPT usará para completar
@@ -87,14 +61,14 @@ def generar_cache_completo():
     Incluye PDFs, DOCX y CSVs relevantes (gestion_social.csv, mujer.csv, etc.)
     """
     cache = {}
-    
+
     # Cargar CSVs clave
     for csv_file in ["gestion_social.csv", "mujer.csv"]:
         path_csv = os.path.join(BASE, csv_file)
         if os.path.exists(path_csv):
             df = pd.read_csv(path_csv)
             cache[csv_file] = df.to_dict(orient="records")
-    
+
     # PDFs y DOCX de referencia
     for carpeta in [PDF_MGA, DOC_BASE, PDD]:
         if not os.path.exists(carpeta):
@@ -109,7 +83,25 @@ def generar_cache_completo():
 
 cache_proyecto = generar_cache_completo()
 
+# ======================================================
+# 🧠 FUNCIONES AUXILIARES
+# ======================================================
+def extraer_json_seguro(respuesta: str) -> dict:
+    """
+    Extrae un JSON de manera segura del string generado por el modelo.
+    """
+    try:
+        return json.loads(respuesta)
+    except json.JSONDecodeError:
+        cleaned = re.search(r"\{.*\}", respuesta, re.DOTALL)
+        if cleaned:
+            return json.loads(cleaned.group())
+        else:
+            return {}
 
+# ======================================================
+# 🧠 IA MGA – JSON SEGURO AVANZADO
+# ======================================================
 def consultar_mga(descripcion: str) -> dict:
     """
     Genera el MGA completo usando:
@@ -159,12 +151,6 @@ REGLAS IMPORTANTES:
     "mga_txt": ""
 }}
 
-INSTRUCCIONES DE CONTENIDO:
-- Para cada objetivo, genera indicadores y metas coherentes usando datos cuantitativos de los CSVs.
-- Para cada alternativa, genera costos, inversiones y beneficios basados en los CSVs.
-- Calcula flujo económico y rentabilidad realista usando los datos disponibles.
-- Respeta exactamente el formato de los ejemplos MGA proporcionados.
-
 FUENTES DE INFORMACIÓN:
 - Cache de proyecto: {json.dumps(cache_proyecto)[:3000]}  # solo preview de referencia
 - Contexto similar: {contexto_txt}
@@ -174,8 +160,6 @@ DESCRIPCIÓN DEL PROYECTO:
 """
     respuesta = llm.invoke(prompt).content
     return extraer_json_seguro(respuesta)
-
-
 
 # ======================================================
 # 📄 GENERADORES DE ARCHIVOS COMPLETOS
@@ -208,13 +192,14 @@ def generar_csv(data):
     b.seek(0)
     return b.read()
 
-# ======================================================
-# 📦 ZIP FINAL COMPLETO
-# ======================================================
 def generar_zip_completo(data):
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("Documento_Tecnico_MGA.docx", generar_docx(data.get("documento_tecnico", "")))
+        doc_tecnico = data.get("documento_tecnico", "")
+        # si es dict, extrae la sección 'mga_txt'
+        if isinstance(doc_tecnico, dict):
+            doc_tecnico = doc_tecnico.get("mga_txt", "")
+        z.writestr("Documento_Tecnico_MGA.docx", generar_docx(doc_tecnico))
         z.writestr("CADENA_VALOR.csv", generar_csv(data.get("cadena_valor", [])))
         z.writestr("CONCEPTO_SECTORIAL.csv", generar_csv(data.get("concepto_sectorial", [])))
         z.writestr("Proyecto_MGA.txt", str(data.get("mga_txt", "")))
@@ -224,7 +209,6 @@ def generar_zip_completo(data):
 # ======================================================
 # 🌐 INTERFAZ WEB
 # ======================================================
-
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -417,7 +401,6 @@ overlay.addEventListener("click", e => { if(e.target === overlay) closeBtn.click
 </body>
 </html>
 """
-
 
 
 # ======================================================
