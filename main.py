@@ -5,13 +5,10 @@
 
 import os, json, re, io, zipfile
 import pandas as pd
-
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-
 from docx import Document
-
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
@@ -45,8 +42,9 @@ def cargar_corpus():
         if not os.path.exists(carpeta):
             continue
         for archivo in os.listdir(carpeta):
+            path = os.path.join(carpeta, archivo)
             if archivo.lower().endswith(".pdf"):
-                documentos.extend(PyPDFLoader(os.path.join(carpeta, archivo)).load())
+                documentos.extend(PyPDFLoader(path).load())
     splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
     chunks = splitter.split_documents(documentos)
     return FAISS.from_documents(chunks, OpenAIEmbeddings())
@@ -54,43 +52,122 @@ def cargar_corpus():
 db = cargar_corpus()
 
 # ======================================================
-# 🧠 IA MGA – JSON SEGURO
+# 🧰 CACHE DE INFORMACIÓN
 # ======================================================
-def extraer_json_seguro(texto: str) -> dict:
-    match = re.search(r"\{[\s\S]*\}", texto)
-    if not match:
-        raise ValueError("La IA no devolvió JSON válido")
-    return json.loads(match.group())
+def generar_cache():
+    cache = {}
+    # CSVs
+    for csv_file in os.listdir(BASE):
+        if csv_file.endswith(".csv"):
+            df = pd.read_csv(os.path.join(BASE, csv_file))
+            cache[csv_file] = df.to_dict(orient="records")
+    # PDFs y DOCX
+    for carpeta in [PDF_MGA, DOC_BASE, PDD]:
+        if not os.path.exists(carpeta):
+            continue
+        for archivo in os.listdir(carpeta):
+            path = os.path.join(carpeta, archivo)
+            if archivo.lower().endswith(".pdf"):
+                loader = PyPDFLoader(path)
+                docs = loader.load()
+                cache[archivo] = [d.page_content for d in docs]
+    return cache
+
+cache_proyecto = generar_cache()
+
+
+
+# ======================================================
+# 🧠 IA MGA – JSON SEGURO AVANZADO
+# ======================================================
+def generar_cache_completo():
+    """
+    Genera un cache de información clave que GPT usará para completar
+    el MGA sin inventar datos irrelevantes.
+    Incluye PDFs, DOCX y CSVs relevantes (gestion_social.csv, mujer.csv, etc.)
+    """
+    cache = {}
+    
+    # Cargar CSVs clave
+    for csv_file in ["gestion_social.csv", "mujer.csv"]:
+        path_csv = os.path.join(BASE, csv_file)
+        if os.path.exists(path_csv):
+            df = pd.read_csv(path_csv)
+            cache[csv_file] = df.to_dict(orient="records")
+    
+    # PDFs y DOCX de referencia
+    for carpeta in [PDF_MGA, DOC_BASE, PDD]:
+        if not os.path.exists(carpeta):
+            continue
+        for archivo in os.listdir(carpeta):
+            path = os.path.join(carpeta, archivo)
+            if archivo.lower().endswith(".pdf"):
+                loader = PyPDFLoader(path)
+                docs = loader.load()
+                cache[archivo] = [d.page_content for d in docs]
+    return cache
+
+cache_proyecto = generar_cache_completo()
+
 
 def consultar_mga(descripcion: str) -> dict:
+    """
+    Genera el MGA completo usando:
+    - Cache de documentos clave
+    - Información de CSV para presupuestos y costos
+    - Ejemplo MGA con todos los campos oficiales
+    """
     contexto = db.similarity_search(descripcion, k=10)
     contexto_txt = "\n\n".join(c.page_content for c in contexto)
     if len(contexto_txt) > 100_000:
         contexto_txt = contexto_txt[-100_000:]
 
-    # Prompt completo para generar TODOS los campos MGA usando tu corpus
     prompt = f"""
 Eres un FORMULADOR EXPERTO MGA – Colombia.
-Genera un documento MGA COMPLETO con todos los campos oficiales: 
-Datos básicos, Problema, Población, Objetivos, Alternativas, Indicadores, 
-Flujo Económico, Evaluación de riesgos, Resumen financiero y demás secciones oficiales.
+Tu tarea es generar un MGA COMPLETO, siguiendo estrictamente la estructura oficial y los ejemplos.
 
-REGLAS:
-- Usa únicamente la información suministrada en los documentos de referencia (RAG).
-- No inventes metas, productos, indicadores, costos ni cifras.
-- Respeta exactamente los formatos MGA oficiales.
-- Responde SOLO JSON válido.
+SECCIONES A GENERAR (obligatorio completar todas):
+1. Datos básicos del proyecto
+2. Contribución al Plan Nacional de Desarrollo
+3. Plan de Desarrollo Departamental o Sectorial
+4. Plan de Desarrollo Distrital o Municipal
+5. Identificación y descripción del problema
+6. Identificación y análisis de participantes
+7. Población afectada y objetivo
+8. Objetivos generales y específicos con indicadores
+9. Alternativas de solución
+10. Estudio de necesidades
+11. Análisis técnico de la alternativa
+12. Localización de la alternativa
+13. Cadena de valor
+14. Análisis de riesgos
+15. Flujo económico
+16. Indicadores y decisión
+17. Esquema financiero y clasificación presupuestal
+18. Resumen del proyecto
 
-FORMATO DE RESPUESTA:
+REGLAS IMPORTANTES:
+- No repitas nombres de personas ni información innecesaria de los documentos.
+- Usa la información de los CSVs clave (gestion_social.csv, mujer.csv) para calcular presupuestos, costos, ingresos y beneficios.
+- Completa todos los campos oficiales con información coherente y basada en los documentos de referencia y cache.
+- Responde SOLO en JSON válido con este formato:
+
 {{
-  "documento_tecnico": "",
-  "cadena_valor": [{{}}],
-  "concepto_sectorial": [{{}}],
-  "mga_txt": ""
+    "documento_tecnico": "",
+    "cadena_valor": [{{}}],
+    "concepto_sectorial": [{{}}],
+    "mga_txt": ""
 }}
 
+INSTRUCCIONES DE CONTENIDO:
+- Para cada objetivo, genera indicadores y metas coherentes usando datos cuantitativos de los CSVs.
+- Para cada alternativa, genera costos, inversiones y beneficios basados en los CSVs.
+- Calcula flujo económico y rentabilidad realista usando los datos disponibles.
+- Respeta exactamente el formato de los ejemplos MGA proporcionados.
+
 FUENTES DE INFORMACIÓN:
-- DOCUMENTOS DE REFERENCIA (RAG): {contexto_txt}
+- Cache de proyecto: {json.dumps(cache_proyecto)[:3000]}  # solo preview de referencia
+- Contexto similar: {contexto_txt}
 
 DESCRIPCIÓN DEL PROYECTO:
 {descripcion}
@@ -98,13 +175,14 @@ DESCRIPCIÓN DEL PROYECTO:
     respuesta = llm.invoke(prompt).content
     return extraer_json_seguro(respuesta)
 
+
+
 # ======================================================
 # 📄 GENERADORES DE ARCHIVOS COMPLETOS
 # ======================================================
 def generar_docx(texto):
     doc = Document()
     doc.add_heading("DOCUMENTO TÉCNICO MGA", 0)
-
     if isinstance(texto, dict):
         for seccion, contenido in texto.items():
             doc.add_heading(seccion, level=1)
@@ -116,15 +194,12 @@ def generar_docx(texto):
         doc.add_paragraph(json.dumps(texto, ensure_ascii=False, indent=2))
     else:
         doc.add_paragraph(str(texto))
-
     b = io.BytesIO()
     doc.save(b)
     b.seek(0)
     return b.read()
 
-
 def generar_csv(data):
-    """Convierte listas de dicts a CSV completos."""
     if not data:
         return b""
     df = pd.DataFrame(data)
@@ -133,36 +208,24 @@ def generar_csv(data):
     b.seek(0)
     return b.read()
 
-
 # ======================================================
 # 📦 ZIP FINAL COMPLETO
 # ======================================================
 def generar_zip_completo(data):
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
-        # DOCX
         z.writestr("Documento_Tecnico_MGA.docx", generar_docx(data.get("documento_tecnico", "")))
-
-        # CSV de cadena_valor
-        cadena_valor = data.get("cadena_valor", [])
-        if cadena_valor:
-            z.writestr("CADENA_VALOR.csv", generar_csv(cadena_valor))
-
-        # CSV de concepto_sectorial
-        concepto_sectorial = data.get("concepto_sectorial", [])
-        if concepto_sectorial:
-            z.writestr("CONCEPTO_SECTORIAL.csv", generar_csv(concepto_sectorial))
-
-        # TXT completo del MGA
-        mga_txt = data.get("mga_txt", "")
-        z.writestr("Proyecto_MGA.txt", str(mga_txt))
+        z.writestr("CADENA_VALOR.csv", generar_csv(data.get("cadena_valor", [])))
+        z.writestr("CONCEPTO_SECTORIAL.csv", generar_csv(data.get("concepto_sectorial", [])))
+        z.writestr("Proyecto_MGA.txt", str(data.get("mga_txt", "")))
     b.seek(0)
     return b.read()
-
 
 # ======================================================
 # 🌐 INTERFAZ WEB
 # ======================================================
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
@@ -348,11 +411,14 @@ openBtn.addEventListener("click", () => {
 closeBtn.addEventListener("click", () => {
   gsap.to(popup,{scale:.9, opacity:0, duration:.25, onComplete:()=> overlay.style.display="none"});
 });
+// ⚡ cerrar al click afuera
 overlay.addEventListener("click", e => { if(e.target === overlay) closeBtn.click(); });
 </script>
 </body>
 </html>
 """
+
+
 
 # ======================================================
 # 🚀 GENERAR MGA
