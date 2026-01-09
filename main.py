@@ -17,18 +17,16 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-
 # ======================================================
 # 🌐 APP
 # ======================================================
 app = FastAPI(title="MGA IA – Fundación Almagua", version="1.0")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
-
 # ======================================================
 # 🔐 CONFIGURACIÓN
 # ======================================================
-MODEL = "gpt-4.1"  # ⚡ usar estándar, no long-context
+MODEL = "gpt-4.1"
 TEMPERATURE = 0.2
 BASE = "data"
 
@@ -36,76 +34,27 @@ PDF_MGA = f"{BASE}/pdf_mga_ejemplos"
 DOC_BASE = f"{BASE}/documento_tecnico_base"
 PDD = f"{BASE}/plan_desarrollo"
 
-FORMATOS = f"{BASE}/formatos"
-CADENA_CSV = f"{FORMATOS}/cadena.csv"
-CONCEPTO_CSV = f"{FORMATOS}/concepto.csv"
-
-PLANES = f"{BASE}/planes_indicativos"
-GESTION_SOCIAL_CSV = f"{PLANES}/gestion_social.csv"
-MUJER_CSV = f"{PLANES}/mujer.csv"
-
 llm = ChatOpenAI(model=MODEL, temperature=TEMPERATURE)
-
 
 # ======================================================
 # 📚 CORPUS RAG (PDFs)
 # ======================================================
 def cargar_corpus():
     documentos = []
-
     for carpeta in [PDF_MGA, DOC_BASE, PDD]:
         if not os.path.exists(carpeta):
             continue
         for archivo in os.listdir(carpeta):
             if archivo.lower().endswith(".pdf"):
                 documentos.extend(PyPDFLoader(os.path.join(carpeta, archivo)).load())
-
-    # ⚡ Reducir tamaño de chunks para menos tokens
     splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
     chunks = splitter.split_documents(documentos)
-
     return FAISS.from_documents(chunks, OpenAIEmbeddings())
-
 
 db = cargar_corpus()
 
-
 # ======================================================
-# 📑 FORMATOS MGA (CSV)
-# ======================================================
-def cargar_formatos_mga():
-    bloques = []
-
-    if os.path.exists(CADENA_CSV):
-        df = pd.read_csv(CADENA_CSV).head(20)  # ⚡ limitar filas
-        bloques.append("FORMATO CADENA DE VALOR MGA:\n" + df.to_csv(index=False))
-
-    if os.path.exists(CONCEPTO_CSV):
-        df = pd.read_csv(CONCEPTO_CSV).head(20)
-        bloques.append("\nFORMATO CONCEPTO SECTORIAL MGA:\n" + df.to_csv(index=False))
-
-    return "\n".join(bloques)
-
-
-# ======================================================
-# 📊 PLANES INDICATIVOS (CSV)
-# ======================================================
-def cargar_planes_indicativos_csv():
-    bloques = []
-
-    if os.path.exists(GESTION_SOCIAL_CSV):
-        df = pd.read_csv(GESTION_SOCIAL_CSV).head(20)
-        bloques.append("PLAN INDICATIVO 2024–2027 – GESTIÓN SOCIAL:\n" + df.to_csv(index=False))
-
-    if os.path.exists(MUJER_CSV):
-        df = pd.read_csv(MUJER_CSV).head(20)
-        bloques.append("\nPLAN INDICATIVO 2024–2027 – MUJER:\n" + df.to_csv(index=False))
-
-    return "\n".join(bloques)
-
-
-# ======================================================
-# 🧠 IA MGA
+# 🧠 IA MGA – JSON SEGURO
 # ======================================================
 def extraer_json_seguro(texto: str) -> dict:
     match = re.search(r"\{[\s\S]*\}", texto)
@@ -113,89 +62,106 @@ def extraer_json_seguro(texto: str) -> dict:
         raise ValueError("La IA no devolvió JSON válido")
     return json.loads(match.group())
 
-
 def consultar_mga(descripcion: str) -> dict:
-    # ⚡ reducir k para menos tokens
-    contexto = db.similarity_search(descripcion, k=5)
+    contexto = db.similarity_search(descripcion, k=10)
     contexto_txt = "\n\n".join(c.page_content for c in contexto)
+    if len(contexto_txt) > 100_000:
+        contexto_txt = contexto_txt[-100_000:]
 
-    # ⚡ limitar longitud
-    if len(contexto_txt) > 150_000:
-        contexto_txt = contexto_txt[-150_000:]
-
+    # Prompt completo para generar TODOS los campos MGA usando tu corpus
     prompt = f"""
 Eres un FORMULADOR EXPERTO MGA – Colombia.
+Genera un documento MGA COMPLETO con todos los campos oficiales: 
+Datos básicos, Problema, Población, Objetivos, Alternativas, Indicadores, 
+Flujo Económico, Evaluación de riesgos, Resumen financiero y demás secciones oficiales.
 
-REGLAS ABSOLUTAS:
-- Usa únicamente información suministrada
-- No inventes metas, productos o indicadores
-- Alinea el proyecto a los Planes Indicativos 2024–2027
-- Usa SOLO metas existentes en los CSV oficiales
-- Respeta exactamente los formatos MGA
-- No expliques nada
-- Responde SOLO JSON válido
+REGLAS:
+- Usa únicamente la información suministrada en los documentos de referencia (RAG).
+- No inventes metas, productos, indicadores, costos ni cifras.
+- Respeta exactamente los formatos MGA oficiales.
+- Responde SOLO JSON válido.
 
 FORMATO DE RESPUESTA:
 {{
-  "documento_tecnico":"",
-  "cadena_valor":[{{}}],
-  "concepto_sectorial":[{{}}],
-  "mga_txt":""
+  "documento_tecnico": "",
+  "cadena_valor": [{{}}],
+  "concepto_sectorial": [{{}}],
+  "mga_txt": ""
 }}
 
-FORMATOS MGA OFICIALES:
-{cargar_formatos_mga()}
-
-PLANES INDICATIVOS OFICIALES (CSV):
-{cargar_planes_indicativos_csv()}
-
-DOCUMENTOS DE REFERENCIA (RAG):
-{contexto_txt}
+FUENTES DE INFORMACIÓN:
+- DOCUMENTOS DE REFERENCIA (RAG): {contexto_txt}
 
 DESCRIPCIÓN DEL PROYECTO:
 {descripcion}
 """
-    return extraer_json_seguro(llm.invoke(prompt).content)
-
+    respuesta = llm.invoke(prompt).content
+    return extraer_json_seguro(respuesta)
 
 # ======================================================
-# 📄 GENERADORES DE ARCHIVOS
+# 📄 GENERADORES DE ARCHIVOS COMPLETOS
 # ======================================================
-def generar_docx(texto: str):
+def generar_docx(texto):
     doc = Document()
     doc.add_heading("DOCUMENTO TÉCNICO MGA", 0)
-    for p in texto.split("\n\n"):
-        doc.add_paragraph(p)
+
+    if isinstance(texto, dict):
+        for seccion, contenido in texto.items():
+            doc.add_heading(seccion, level=1)
+            if isinstance(contenido, (dict, list)):
+                doc.add_paragraph(json.dumps(contenido, ensure_ascii=False, indent=2))
+            else:
+                doc.add_paragraph(str(contenido))
+    elif isinstance(texto, list):
+        doc.add_paragraph(json.dumps(texto, ensure_ascii=False, indent=2))
+    else:
+        doc.add_paragraph(str(texto))
+
     b = io.BytesIO()
     doc.save(b)
     b.seek(0)
     return b.read()
 
 
-def generar_excel(data):
+def generar_csv(data):
+    """Convierte listas de dicts a CSV completos."""
+    if not data:
+        return b""
     df = pd.DataFrame(data)
     b = io.BytesIO()
-    df.to_excel(b, index=False)
+    df.to_csv(b, index=False, encoding='utf-8-sig')
     b.seek(0)
     return b.read()
 
 
 # ======================================================
-# 📦 ZIP FINAL
+# 📦 ZIP FINAL COMPLETO
 # ======================================================
-def generar_zip(data):
+def generar_zip_completo(data):
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("Documento_Tecnico_MGA.docx", generar_docx(data["documento_tecnico"]))
-        z.writestr("CADENA_VALOR.xlsx", generar_excel(data["cadena_valor"]))
-        z.writestr("CONCEPTO_SECTORIAL.xlsx", generar_excel(data["concepto_sectorial"]))
-        z.writestr("Proyecto_MGA.txt", data["mga_txt"])
+        # DOCX
+        z.writestr("Documento_Tecnico_MGA.docx", generar_docx(data.get("documento_tecnico", "")))
+
+        # CSV de cadena_valor
+        cadena_valor = data.get("cadena_valor", [])
+        if cadena_valor:
+            z.writestr("CADENA_VALOR.csv", generar_csv(cadena_valor))
+
+        # CSV de concepto_sectorial
+        concepto_sectorial = data.get("concepto_sectorial", [])
+        if concepto_sectorial:
+            z.writestr("CONCEPTO_SECTORIAL.csv", generar_csv(concepto_sectorial))
+
+        # TXT completo del MGA
+        mga_txt = data.get("mga_txt", "")
+        z.writestr("Proyecto_MGA.txt", str(mga_txt))
     b.seek(0)
     return b.read()
 
 
 # ======================================================
-# 🌐 WEB
+# 🌐 INTERFAZ WEB
 # ======================================================
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -382,13 +348,11 @@ openBtn.addEventListener("click", () => {
 closeBtn.addEventListener("click", () => {
   gsap.to(popup,{scale:.9, opacity:0, duration:.25, onComplete:()=> overlay.style.display="none"});
 });
-// ⚡ cerrar al click afuera
 overlay.addEventListener("click", e => { if(e.target === overlay) closeBtn.click(); });
 </script>
 </body>
 </html>
 """
-
 
 # ======================================================
 # 🚀 GENERAR MGA
@@ -396,7 +360,7 @@ overlay.addEventListener("click", e => { if(e.target === overlay) closeBtn.click
 @app.post("/generar")
 def generar(descripcion: str = Form(...)):
     data = consultar_mga(descripcion)
-    zip_bytes = generar_zip(data)
+    zip_bytes = generar_zip_completo(data)
     return StreamingResponse(
         io.BytesIO(zip_bytes),
         media_type="application/zip",
