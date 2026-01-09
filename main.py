@@ -58,7 +58,6 @@ def generar_cache_completo():
     """
     Genera un cache de información clave que GPT usará para completar
     el MGA sin inventar datos irrelevantes.
-    Incluye PDFs, DOCX y CSVs relevantes (gestion_social.csv, mujer.csv, etc.)
     """
     cache = {}
 
@@ -89,15 +88,24 @@ cache_proyecto = generar_cache_completo()
 def extraer_json_seguro(respuesta: str) -> dict:
     """
     Extrae un JSON de manera segura del string generado por el modelo.
+    Corrige errores comunes de formato y evita que rompa la app.
     """
-    try:
-        return json.loads(respuesta)
-    except json.JSONDecodeError:
-        cleaned = re.search(r"\{.*\}", respuesta, re.DOTALL)
-        if cleaned:
-            return json.loads(cleaned.group())
-        else:
-            return {}
+    if not respuesta:
+        return {}
+    texto = respuesta.replace("\n", " ").replace("\r", " ").strip()
+    match = re.search(r"\{.*\}", texto, re.DOTALL)
+    if match:
+        texto_json = match.group()
+        texto_json = texto_json.replace("'", '"')
+        texto_json = re.sub(r',\s*}', '}', texto_json)
+        texto_json = re.sub(r',\s*]', ']', texto_json)
+        try:
+            return json.loads(texto_json)
+        except json.JSONDecodeError as e:
+            print("⚠️ JSONDecodeError:", e)
+            return {"mga_txt": texto}
+    else:
+        return {"mga_txt": texto}
 
 # ======================================================
 # 🧠 IA MGA – JSON SEGURO AVANZADO
@@ -109,16 +117,27 @@ def consultar_mga(descripcion: str) -> dict:
     - Información de CSV para presupuestos y costos
     - Ejemplo MGA con todos los campos oficiales
     """
+    # Buscar contexto similar
     contexto = db.similarity_search(descripcion, k=10)
     contexto_txt = "\n\n".join(c.page_content for c in contexto)
     if len(contexto_txt) > 100_000:
         contexto_txt = contexto_txt[-100_000:]
 
+    # Incluir datos CSV para que LLM haga análisis de costos y cifras
+    gestion_social = json.dumps(cache_proyecto.get("gestion_social.csv", [])[:500], ensure_ascii=False)
+    mujer_csv = json.dumps(cache_proyecto.get("mujer.csv", [])[:500], ensure_ascii=False)
+
     prompt = f"""
 Eres un FORMULADOR EXPERTO MGA – Colombia.
 Tu tarea es generar un MGA COMPLETO, siguiendo estrictamente la estructura oficial y los ejemplos.
 
-SECCIONES A GENERAR (obligatorio completar todas):
+Incluye en el Documento Técnico:
+- Análisis detallado de costos basado en los CSVs 'gestion_social.csv' y 'mujer.csv'.
+- Organización completa según las 18 secciones oficiales.
+- Redacción clara, profesional, y basada en datos y cifras reales.
+- Presupuestos, ingresos, beneficios y distribución de recursos claros y coherentes.
+
+SECCIONES A GENERAR:
 1. Datos básicos del proyecto
 2. Contribución al Plan Nacional de Desarrollo
 3. Plan de Desarrollo Departamental o Sectorial
@@ -138,12 +157,7 @@ SECCIONES A GENERAR (obligatorio completar todas):
 17. Esquema financiero y clasificación presupuestal
 18. Resumen del proyecto
 
-REGLAS IMPORTANTES:
-- No repitas nombres de personas ni información innecesaria de los documentos.
-- Usa la información de los CSVs clave (gestion_social.csv, mujer.csv) para calcular presupuestos, costos, ingresos y beneficios.
-- Completa todos los campos oficiales con información coherente y basada en los documentos de referencia y cache.
-- Responde SOLO en JSON válido con este formato:
-
+Responde SOLO en JSON válido con este formato:
 {{
     "documento_tecnico": "",
     "cadena_valor": [{{}}],
@@ -151,9 +165,10 @@ REGLAS IMPORTANTES:
     "mga_txt": ""
 }}
 
-FUENTES DE INFORMACIÓN:
-- Cache de proyecto: {json.dumps(cache_proyecto)[:3000]}  # solo preview de referencia
-- Contexto similar: {contexto_txt}
+FUENTES:
+- Contexto similar: {contexto_txt[:3000]}  # solo preview
+- Datos CSV 'gestion_social.csv': {gestion_social}
+- Datos CSV 'mujer.csv': {mujer_csv}
 
 DESCRIPCIÓN DEL PROYECTO:
 {descripcion}
@@ -162,7 +177,7 @@ DESCRIPCIÓN DEL PROYECTO:
     return extraer_json_seguro(respuesta)
 
 # ======================================================
-# 📄 GENERADORES DE ARCHIVOS COMPLETOS
+# 📄 GENERADORES DE ARCHIVOS
 # ======================================================
 def generar_docx(texto):
     doc = Document()
@@ -196,7 +211,6 @@ def generar_zip_completo(data):
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
         doc_tecnico = data.get("documento_tecnico", "")
-        # si es dict, extrae la sección 'mga_txt'
         if isinstance(doc_tecnico, dict):
             doc_tecnico = doc_tecnico.get("mga_txt", "")
         z.writestr("Documento_Tecnico_MGA.docx", generar_docx(doc_tecnico))
